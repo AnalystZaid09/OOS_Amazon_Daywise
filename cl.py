@@ -1,4 +1,4 @@
-import streamlit as st
+# cl.py in github repo
 import streamlit as st
 import pandas as pd
 import io
@@ -34,21 +34,22 @@ if file_max_days and file_min_days and file_inventory and file_pm:
 
         # ---- Inventory Filtering & New ASIN Append Logic ---- #
         with st.spinner("Filtering inventory stock..."):
-            Inventory.iloc[:, 10] = pd.to_numeric(Inventory.iloc[:, 10], errors='coerce').fillna(0)  # fulfillable qty
-            Inventory.iloc[:, 12] = pd.to_numeric(Inventory.iloc[:, 12], errors='coerce').fillna(0)  # reserved qty
+            Inventory['afn-fulfillable-quantity'] = pd.to_numeric(Inventory['afn-fulfillable-quantity'], errors='coerce').fillna(0)
+            Inventory['afn-reserved-quantity'] = pd.to_numeric(Inventory['afn-reserved-quantity'], errors='coerce').fillna(0)
 
-            asin_fulfillable = Inventory.loc[Inventory.iloc[:, 10] != 0, Inventory.columns[2]].dropna().unique().tolist()
-            asin_reserved = Inventory.loc[Inventory.iloc[:, 12] != 0, Inventory.columns[2]].dropna().unique().tolist()
+            asin1 = Inventory.loc[Inventory['afn-fulfillable-quantity'] != 0, 'asin'].dropna().unique().tolist()
+            asin2 = Inventory.loc[Inventory['afn-reserved-quantity'] != 0, 'asin'].dropna().unique().tolist()
 
-            asin_inventory_filtered = list(set(asin_fulfillable) | set(asin_reserved))
-            sales_asins = day_max['asin'].dropna().unique().tolist()
-            new_asins = [a for a in asin_inventory_filtered if a not in sales_asins]
+            filtered_asins = asin1 + [a for a in asin2 if a not in asin1]
 
-            df_inventory_new = Inventory[Inventory.iloc[:, 2].isin(new_asins)].drop_duplicates(subset=Inventory.columns[2], keep='first')
-            df_inventory_new = df_inventory_new.iloc[:, [2, 10, 12]].copy()
-            df_inventory_new.columns = ['ASIN', 'SIH', 'Reserved Stock']
+            # Append ASIN to original column
+            df_append = pd.DataFrame({'asin': filtered_asins})
+            Inventory = pd.concat([Inventory, df_append], ignore_index=True)
 
-        st.success(f"✅ Inventory filtered! {len(new_asins)} new ASINs will be added to the report")
+            # Store for report
+            st.session_state.filtered_asins = filtered_asins  # session me save
+
+        st.success(f"✅ Inventory filtered! {len(filtered_asins)} new ASINs will be added to the report")
 
         # ---- Data Cleaning ---- #
         with st.spinner("Cleaning sales data..."):
@@ -76,49 +77,53 @@ if file_max_days and file_min_days and file_inventory and file_pm:
         if st.button("🚀 Generate Analysis", type="primary"):
             with st.spinner("Generating report..."):
                 df_new = pd.DataFrame()
-                df_new['ASIN'] = day_max['asin'].dropna().drop_duplicates().reset_index(drop=True)
+                
+                # Unique ASINs from Sales + Inventory
+                sales_asins = day_max['asin'].dropna().drop_duplicates().tolist()
+                inventory_asins = st.session_state.filtered_asins
+                all_asins = list(set(sales_asins + inventory_asins))
 
+                df_new['ASIN'] = all_asins
+
+                # Map Brand
                 df_pm_brand = PM.iloc[:, [0, 6]].drop_duplicates(subset=PM.columns[0], keep='first')
                 df_pm_brand.columns = ['ASIN', 'Brand']
                 df_new['Brand'] = df_new['ASIN'].map(df_pm_brand.set_index('ASIN')['Brand'])
 
+                # Map Product Name
                 df_pm_product = day_max[['asin', 'product-name']].drop_duplicates(subset='asin', keep='first')
                 df_pm_product.columns = ['ASIN', 'Product']
                 df_new['Product'] = df_new['ASIN'].map(df_pm_product.set_index('ASIN')['Product'])
 
+                # Map CP first
+                df_pm_cp = PM.iloc[:, [0, 9]].drop_duplicates(subset=PM.columns[0], keep='first')
+                df_pm_cp.columns = ['ASIN', 'CP']
+                df_new['CP'] = df_new['ASIN'].map(df_pm_cp.set_index('ASIN')['CP']).fillna(0)
+
+                # Map Sales
                 df_max_sales = day_max.groupby('asin')['quantity'].sum()
                 df_new['Sale last Max days'] = df_new['ASIN'].map(df_max_sales).fillna(0)
 
                 df_new['DRR Max days'] = (df_new['Sale last Max days'] / max_days).round(2)
+
                 df_min_sales = day_min.groupby('asin')['quantity'].sum()
                 df_new['Sale last Min days'] = df_new['ASIN'].map(df_min_sales).fillna(0)
 
                 df_new['DRR Min days'] = (df_new['Sale last Min days'] / min_days).round(2)
 
-                df_inventory_main = Inventory.iloc[:, [2, 10]].drop_duplicates(subset=Inventory.columns[2], keep='first')
-                df_inventory_main.columns = ['ASIN', 'SIH']
-                df_new['SIH'] = df_new['ASIN'].map(df_inventory_main.set_index('ASIN')['SIH'])
-
-                df_inventory_reserved = Inventory.iloc[:, [2, 12]].drop_duplicates(subset=Inventory.columns[2], keep='first')
-                df_inventory_reserved.columns = ['ASIN', 'Reserved Stock']
-                df_new['Reserved Stock'] = df_new['ASIN'].map(df_inventory_reserved.set_index('ASIN')['Reserved Stock'])
-
-                df_new['SIH'] = pd.to_numeric(df_new['SIH'], errors='coerce').fillna(0)
-                df_new['Reserved Stock'] = pd.to_numeric(df_new['Reserved Stock'], errors='coerce').fillna(0)
+                # Inventory stock lookup (no extra rows appended)
+                inv = Inventory.drop_duplicates('asin').set_index('asin')
+                df_new['SIH'] = df_new['ASIN'].map(inv.get('afn-fulfillable-quantity')).fillna(0)
+                df_new['Reserved Stock'] = df_new['ASIN'].map(inv.get('afn-reserved-quantity')).fillna(0)
                 df_new['Total Stock'] = df_new['SIH'] + df_new['Reserved Stock']
 
-                df_pm_cp = PM.iloc[:, [0, 9]].drop_duplicates(subset=PM.columns[0], keep='first')
-                df_pm_cp.columns = ['ASIN', 'CP']
-                df_new['CP'] = df_new['ASIN'].map(df_pm_cp.set_index('ASIN')['CP']).fillna(0)
-
+                # Calculate Total Value after CP is mapped
                 df_new['Total Value'] = df_new['Total Stock'] * df_new['CP']
 
+                # Map Manager
                 df_pm_mgr = PM.iloc[:, [0, 4]].drop_duplicates(subset=PM.columns[0], keep='first')
                 df_pm_mgr.columns = ['ASIN', 'Manager']
                 df_new['Manager'] = df_new['ASIN'].map(df_pm_mgr.set_index('ASIN')['Manager'])
-
-                df_new = pd.concat([df_new, df_inventory_new], ignore_index=True)
-                df_new['Total Value'] = df_new['Total Stock'] * df_new['CP']
 
             st.success("✅ Report generated!")
 
