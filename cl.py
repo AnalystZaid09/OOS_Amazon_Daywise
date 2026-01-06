@@ -1,4 +1,4 @@
-# cl.py in github repo
+# cl.py in github repo - changes.py in folder
 import streamlit as st
 import pandas as pd
 import io
@@ -36,6 +36,11 @@ if file_max_days and file_min_days and file_inventory and file_pm:
         with st.spinner("Filtering inventory stock..."):
             Inventory['afn-fulfillable-quantity'] = pd.to_numeric(Inventory['afn-fulfillable-quantity'], errors='coerce').fillna(0)
             Inventory['afn-reserved-quantity'] = pd.to_numeric(Inventory['afn-reserved-quantity'], errors='coerce').fillna(0)
+            
+            # Normalize ASINs
+            for df_temp in [day_max, day_min, Inventory, PM]:
+                asin_col = [c for c in df_temp.columns if c.lower() == 'asin'][0]
+                df_temp[asin_col] = df_temp[asin_col].astype(str).str.strip().str.upper()
 
             asin1 = Inventory.loc[Inventory['afn-fulfillable-quantity'] != 0, 'asin'].dropna().unique().tolist()
             asin2 = Inventory.loc[Inventory['afn-reserved-quantity'] != 0, 'asin'].dropna().unique().tolist()
@@ -53,11 +58,14 @@ if file_max_days and file_min_days and file_inventory and file_pm:
 
         # ---- Data Cleaning ---- #
         with st.spinner("Cleaning sales data..."):
+            # Exclude Cancelled orders and ensure valid quantity
             day_max['item-price'] = pd.to_numeric(day_max['item-price'], errors='coerce')
-            day_max = day_max[(day_max['item-price'].notna()) & (day_max['item-price'] != 0)]
+            day_max = day_max[day_max['order-status'] != 'Cancelled']
+            day_max = day_max[day_max['quantity'] > 0]
 
             day_min['item-price'] = pd.to_numeric(day_min['item-price'], errors='coerce')
-            day_min = day_min[(day_min['item-price'].notna()) & (day_min['item-price'] != 0)]
+            day_min = day_min[day_min['order-status'] != 'Cancelled']
+            day_min = day_min[day_min['quantity'] > 0]
 
             day_max.reset_index(drop=True, inplace=True)
             day_min.reset_index(drop=True, inplace=True)
@@ -90,10 +98,17 @@ if file_max_days and file_min_days and file_inventory and file_pm:
                 df_pm_brand.columns = ['ASIN', 'Brand']
                 df_new['Brand'] = df_new['ASIN'].map(df_pm_brand.set_index('ASIN')['Brand'])
 
-                # Map Product Name
-                df_pm_product = day_max[['asin', 'product-name']].drop_duplicates(subset='asin', keep='first')
-                df_pm_product.columns = ['ASIN', 'Product']
-                df_new['Product'] = df_new['ASIN'].map(df_pm_product.set_index('ASIN')['Product'])
+                # Comprehensive Product Name Mapping
+                # 1. PM
+                pm_names = PM.set_index(PM.columns[0])[PM.columns[7]].to_dict()
+                # 2. day_max
+                sales_names = day_max.set_index('asin')['product-name'].to_dict()
+                # 3. Inventory
+                inv_names = Inventory.set_index('asin')['product-name'].to_dict()
+                
+                # Combine (Priority: PM > Sales > Inventory)
+                full_product_map = {**inv_names, **sales_names, **pm_names}
+                df_new['Product'] = df_new['ASIN'].map(full_product_map)
 
                 # Map CP first
                 df_pm_cp = PM.iloc[:, [0, 9]].drop_duplicates(subset=PM.columns[0], keep='first')
