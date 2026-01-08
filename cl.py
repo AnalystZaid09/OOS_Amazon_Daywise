@@ -25,65 +25,79 @@ def load_and_clean_sales_data(file, price_col='item-price'):
     """Load and clean sales data"""
     df = pd.read_excel(file)
     df[price_col] = pd.to_numeric(df[price_col], errors='coerce')
-    df = df[(df[price_col].notna()) & (df[price_col] != 0)]
+    # Filter out cancelled orders if column exists
+    if 'order-status' in df.columns:
+        df = df[df['order-status'] != 'Cancelled']
+    df = df[df['quantity'] > 0]
     df.reset_index(drop=True, inplace=True)
+    return df
+
+def normalize_asins(df):
+    """Normalize ASIN column in dataframe"""
+    asin_col = [c for c in df.columns if c.lower() == 'asin']
+    if asin_col:
+        df[asin_col[0]] = df[asin_col[0]].astype(str).str.strip().str.upper()
     return df
 
 def create_sales_report(day_max, day_min, PM, Inventory, max_days, min_days):
     """Create sales report dataframe"""
-    # Create new dataframe with unique ASINs
-    df_new = pd.DataFrame()
-    df_new['ASIN'] = day_max['asin'].dropna().drop_duplicates().reset_index(drop=True)
+    # Normalize all ASINs
+    day_max = normalize_asins(day_max)
+    day_min = normalize_asins(day_min)
+    PM = normalize_asins(PM)
+    Inventory = normalize_asins(Inventory)
+
+    # Create new dataframe with unique ASINs from both Sales and Inventory
+    sales_asins = day_max['asin'].dropna().unique().tolist()
     
-    # Add Brand from PM
+    # Filter inventory ASINs with stock (as in original logic)
+    Inventory['afn-fulfillable-quantity'] = pd.to_numeric(Inventory['afn-fulfillable-quantity'], errors='coerce').fillna(0)
+    Inventory['afn-reserved-quantity'] = pd.to_numeric(Inventory['afn-reserved-quantity'], errors='coerce').fillna(0)
+    
+    inv_asins_with_stock = Inventory.loc[(Inventory['afn-fulfillable-quantity'] != 0) | (Inventory['afn-reserved-quantity'] != 0), 'asin'].dropna().unique().tolist()
+    
+    all_asins = list(set(sales_asins + inv_asins_with_stock))
+    
+    df_new = pd.DataFrame({'ASIN': all_asins})
+    
+    # Add Brand from PM (Column 0: ASIN, Column 6: Brand)
     df_pm_lookup = PM.iloc[:, [0, 6]].copy()
     df_pm_lookup.columns = ['ASIN', 'Brand']
     df_pm_lookup = df_pm_lookup.drop_duplicates(subset='ASIN', keep='first')
     df_new['Brand'] = df_new['ASIN'].map(df_pm_lookup.set_index('ASIN')['Brand'])
     
-    # Add Product Name
-    df_product_lookup = day_max[['asin', 'product-name']].dropna(subset=['asin']).drop_duplicates(subset='asin', keep='first')
-    df_product_lookup.columns = ['ASIN', 'Product']
-    df_new['Product'] = df_new['ASIN'].map(df_product_lookup.set_index('ASIN')['Product'])
+    # Add Product Name (Priority: PM > Sales > Inventory)
+    pm_names = PM.set_index(PM.columns[0])[PM.columns[7]].to_dict()
+    sales_names = day_max.set_index('asin')['product-name'].to_dict()
+    inv_names = Inventory.set_index('asin')['product-name'].to_dict()
+    full_product_map = {**inv_names, **sales_names, **pm_names}
+    df_new['Product'] = df_new['ASIN'].map(full_product_map)
     
     # Calculate Sales for Max days
-    asin_qty_sum = day_max.groupby('asin', as_index=False)['quantity'].sum()
-    df_new['Sale last Max days'] = df_new['ASIN'].map(asin_qty_sum.set_index('asin')['quantity'])
-    df_new['Sale last Max days'] = pd.to_numeric(df_new['Sale last Max days'], errors='coerce').fillna(0)
-    df_new['DRR Max days'] = df_new['Sale last Max days'] / max_days
+    asin_qty_sum = day_max.groupby('asin')['quantity'].sum()
+    df_new['Sale last Max days'] = df_new['ASIN'].map(asin_qty_sum).fillna(0)
+    df_new['DRR Max days'] = (df_new['Sale last Max days'] / max_days).round(2)
     
     # Calculate Sales for Min days
-    day_min['quantity'] = pd.to_numeric(day_min['quantity'], errors='coerce').fillna(0)
-    asin_sales_sum = day_min.groupby('asin', as_index=False)['quantity'].sum()
-    df_new['Sale last Min days'] = df_new['ASIN'].map(asin_sales_sum.set_index('asin')['quantity'])
-    df_new['Sale last Min days'] = df_new['Sale last Min days'].fillna(0)
-    df_new['Sale last Min days'] = pd.to_numeric(df_new['Sale last Min days'], errors='coerce').fillna(0)
-    df_new['DRR Min days'] = df_new['Sale last Min days'] / min_days
+    asin_sales_sum = day_min.groupby('asin')['quantity'].sum()
+    df_new['Sale last Min days'] = df_new['ASIN'].map(asin_sales_sum).fillna(0)
+    df_new['DRR Min days'] = (df_new['Sale last Min days'] / min_days).round(2)
     
-    # Add Stock Information
-    df_inventory_lookup = Inventory.iloc[:, [2, 10]].copy()
-    df_inventory_lookup.columns = ['ASIN', 'SIH']
-    df_inventory_lookup = df_inventory_lookup.drop_duplicates(subset='ASIN', keep='first')
-    df_new['SIH'] = df_new['ASIN'].map(df_inventory_lookup.set_index('ASIN')['SIH'])
-    
-    df_inventory_lookup = Inventory.iloc[:, [2, 12]].copy()
-    df_inventory_lookup.columns = ['ASIN', 'Reserved Stock']
-    df_inventory_lookup = df_inventory_lookup.drop_duplicates(subset='ASIN', keep='first')
-    df_new['Reserved Stock'] = df_new['ASIN'].map(df_inventory_lookup.set_index('ASIN')['Reserved Stock'])
-    
-    df_new['SIH'] = pd.to_numeric(df_new['SIH'], errors='coerce').fillna(0)
-    df_new['Reserved Stock'] = pd.to_numeric(df_new['Reserved Stock'], errors='coerce').fillna(0)
+    # Add Stock Information (Summed)
+    inv_summed = Inventory.groupby('asin')[['afn-fulfillable-quantity', 'afn-reserved-quantity']].sum()
+    df_new['SIH'] = df_new['ASIN'].map(inv_summed['afn-fulfillable-quantity']).fillna(0)
+    df_new['Reserved Stock'] = df_new['ASIN'].map(inv_summed['afn-reserved-quantity']).fillna(0)
     df_new['Total Stock'] = df_new['SIH'] + df_new['Reserved Stock']
     
-    # Add CP
-    df_pm_lookup = PM.iloc[:, [0, 9]].copy()
-    df_pm_lookup.columns = ['ASIN', 'CP']
-    df_pm_lookup = df_pm_lookup.drop_duplicates(subset='ASIN', keep='first')
-    df_new['CP'] = df_new['ASIN'].map(df_pm_lookup.set_index('ASIN')['CP'])
+    # Add CP (Column 0: ASIN, Column 9: CP)
+    df_pm_lookup_cp = PM.iloc[:, [0, 9]].copy()
+    df_pm_lookup_cp.columns = ['ASIN', 'CP']
+    df_pm_lookup_cp = df_pm_lookup_cp.drop_duplicates(subset='ASIN', keep='first')
+    df_new['CP'] = df_new['ASIN'].map(df_pm_lookup_cp.set_index('ASIN')['CP']).fillna(0)
     
     df_new['Total Value'] = df_new["Total Stock"] * df_new["CP"]
     
-    # Add Manager
+    # Add Manager (Column 0: ASIN, Column 4: Manager)
     df_pm_lookup_mgr = PM.iloc[:, [0, 4]].copy()
     df_pm_lookup_mgr.columns = ['ASIN', 'Manager']
     df_pm_lookup_mgr = df_pm_lookup_mgr.drop_duplicates(subset='ASIN', keep='first')
@@ -93,6 +107,10 @@ def create_sales_report(day_max, day_min, PM, Inventory, max_days, min_days):
 
 def create_inventory_report(Inventory, PM, df_new, max_days, min_days):
     """Create inventory report dataframe"""
+    # Normalize ASINs
+    Inventory = normalize_asins(Inventory)
+    PM = normalize_asins(PM)
+    
     # Create pivot table
     Inventory_pivot = Inventory.pivot_table(
         index=["asin", "sku"],
@@ -103,20 +121,42 @@ def create_inventory_report(Inventory, PM, df_new, max_days, min_days):
     Inventory_pivot["Total Stock"] = Inventory_pivot["afn-fulfillable-quantity"] + Inventory_pivot["afn-reserved-quantity"]
     
     # Merge with PM data
-    Inventory_pivot = Inventory_pivot.merge(PM, left_on="asin", right_on="ASIN", how="left")
+    Inventory_pivot = Inventory_pivot.merge(PM, left_on="asin", right_on=PM.columns[0], how="left")
+    
+    # Map Vendor SKU Codes, Brand Manager, Brand, Product Name, CP
+    # (Assuming PM columns: 0:ASIN, 1:Vendor SKU, 4:Manager, 6:Brand, 7:Product, 9:CP)
+    # Using names if available, otherwise indices
+    cols_to_keep = ['asin', 'sku', 'afn-fulfillable-quantity', 'afn-reserved-quantity', 'Total Stock']
+    
+    # Add calculated fields from PM
+    Inventory_pivot["Vendor SKU Codes"] = Inventory_pivot.iloc[:, 1 + 5] # Placeholder based on user's code
+    # User's code used names, let's try to match them if available
+    pm_cols = PM.columns.tolist()
+    
+    target_cols = {
+        'Vendor SKU Codes': pm_cols[1] if len(pm_cols) > 1 else None,
+        'Brand Manager': pm_cols[4] if len(pm_cols) > 4 else None,
+        'Brand': pm_cols[6] if len(pm_cols) > 6 else None,
+        'Product Name': pm_cols[7] if len(pm_cols) > 7 else None,
+        'CP': pm_cols[9] if len(pm_cols) > 9 else None
+    }
+    
+    for label, col_name in target_cols.items():
+        if col_name:
+            Inventory_pivot[label] = Inventory_pivot[col_name]
     
     # Select relevant columns
-    Inventory_pivot = Inventory_pivot[['asin', 'sku', 'Vendor SKU Codes', 'Brand Manager', 'Brand',
-                                       'Product Name', 'afn-fulfillable-quantity', 'afn-reserved-quantity',
-                                       'Total Stock', 'CP']]
+    final_cols = ['asin', 'sku', 'Vendor SKU Codes', 'Brand Manager', 'Brand',
+                  'Product Name', 'afn-fulfillable-quantity', 'afn-reserved-quantity',
+                  'Total Stock', 'CP']
+    Inventory_pivot = Inventory_pivot[[c for c in final_cols if c in Inventory_pivot.columns]]
     
-    # Add sales data with Max days DRR
+    # Add sales data from df_new
     df_new_indexed = df_new.set_index("ASIN")
-    Inventory_pivot["Sales last Max days"] = Inventory_pivot["asin"].map(df_new_indexed["Sale last Max days"])
+    Inventory_pivot["Sales last Max days"] = Inventory_pivot["asin"].map(df_new_indexed["Sale last Max days"]).fillna(0)
     Inventory_pivot["DRR Max"] = (Inventory_pivot["Sales last Max days"] / max_days).round(2)
     
-    # Add sales data with Min days DRR
-    Inventory_pivot["Sales last Min days"] = Inventory_pivot["asin"].map(df_new_indexed["Sale last Min days"])
+    Inventory_pivot["Sales last Min days"] = Inventory_pivot["asin"].map(df_new_indexed["Sale last Min days"]).fillna(0)
     Inventory_pivot["DRR Min"] = (Inventory_pivot["Sales last Min days"] / min_days).round(2)
     
     return Inventory_pivot
@@ -152,6 +192,7 @@ if process_data and all([max_days_file, min_days_file, inventory_file, pm_file])
         except Exception as e:
             st.error(f'❌ Error processing data: {str(e)}')
             st.session_state['processed'] = False
+            st.exception(e)
 
 elif process_data:
     st.warning('⚠️ Please upload all required files before processing.')
