@@ -21,42 +21,68 @@ min_days = st.sidebar.number_input("Minimum Number of Days", min_value=1, value=
 # Process button
 process_data = st.sidebar.button("Process Data", type="primary")
 
-def load_and_clean_sales_data(file, price_col='item-price'):
-    """Load and clean sales data"""
-    df = pd.read_excel(file)
-    df[price_col] = pd.to_numeric(df[price_col], errors='coerce')
-    # Filter out cancelled orders if column exists
-    if 'order-status' in df.columns:
-        df = df[df['order-status'] != 'Cancelled']
-    df = df[df['quantity'] > 0]
-    df.reset_index(drop=True, inplace=True)
+def normalize_dataframe(df):
+    """Normalize column names and ASIN values"""
+    # Rename common columns to standard lowercase names
+    rename_mapping = {
+        'asin': 'asin',
+        'ASIN': 'asin',
+        'quantity': 'quantity',
+        'Quantity': 'quantity',
+        'product-name': 'product-name',
+        'Product Name': 'product-name',
+        'item-price': 'item-price',
+        'Item Price': 'item-price',
+        'order-status': 'order-status',
+        'Order Status': 'order-status'
+    }
+    # Case-insensitive rename
+    current_cols = {c.lower(): c for c in df.columns}
+    final_rename = {}
+    for standard_col, target in rename_mapping.items():
+        if standard_col.lower() in current_cols:
+            final_rename[current_cols[standard_col.lower()]] = target
+    
+    df = df.rename(columns=final_rename)
+    
+    # Normalize ASIN values if column exists
+    if 'asin' in df.columns:
+        df['asin'] = df['asin'].astype(str).str.strip().str.upper()
     return df
 
-def normalize_asins(df):
-    """Normalize ASIN column in dataframe"""
-    asin_col = [c for c in df.columns if c.lower() == 'asin']
-    if asin_col:
-        df[asin_col[0]] = df[asin_col[0]].astype(str).str.strip().str.upper()
+def load_and_clean_sales_data(file, price_col='item-price'):
+    """Load and clean sales data - Aligned with day.ipynb"""
+    df = pd.read_excel(file)
+    df = normalize_dataframe(df)
+    
+    # Notebook logic: Filter by non-zero price
+    actual_price_col = 'item-price' if 'item-price' in df.columns else price_col
+    if actual_price_col in df.columns:
+        df[actual_price_col] = pd.to_numeric(df[actual_price_col], errors='coerce')
+        df = df[(df[actual_price_col].notna()) & (df[actual_price_col] != 0)]
+        
+    # Filter out junk ASINs (as requested by user)
+    junk_asins = {'UNKNOW', 'UNKNOWN', 'NAN', 'N/A', '', 'NONE', '0', 'NULL'}
+    if 'asin' in df.columns:
+        df = df[~df['asin'].astype(str).str.upper().isin(junk_asins)]
+    
+    # Ensure quantity is numeric for summing
+    if 'quantity' in df.columns:
+        df['quantity'] = pd.to_numeric(df['quantity'], errors='coerce').fillna(0)
+        
+    df.reset_index(drop=True, inplace=True)
     return df
 
 def create_sales_report(day_max, day_min, PM, Inventory, max_days, min_days):
     """Create sales report dataframe"""
-    # Normalize all ASINs
-    day_max = normalize_asins(day_max)
-    day_min = normalize_asins(day_min)
-    PM = normalize_asins(PM)
-    Inventory = normalize_asins(Inventory)
+    # Standardize all dataframes
+    PM = normalize_dataframe(PM)
+    Inventory = normalize_dataframe(Inventory)
+    
+    # day_max and day_min are already standardized and cleaned in load_and_clean_sales_data
 
-    # Create new dataframe with unique ASINs from both Sales and Inventory
-    sales_asins = day_max['asin'].dropna().unique().tolist()
-    
-    # Filter inventory ASINs with stock (as in original logic)
-    Inventory['afn-fulfillable-quantity'] = pd.to_numeric(Inventory['afn-fulfillable-quantity'], errors='coerce').fillna(0)
-    Inventory['afn-reserved-quantity'] = pd.to_numeric(Inventory['afn-reserved-quantity'], errors='coerce').fillna(0)
-    
-    inv_asins_with_stock = Inventory.loc[(Inventory['afn-fulfillable-quantity'] != 0) | (Inventory['afn-reserved-quantity'] != 0), 'asin'].dropna().unique().tolist()
-    
-    all_asins = list(set(sales_asins + inv_asins_with_stock))
+    # Create list of unique ASINs from Sales only
+    all_asins = day_max['asin'].dropna().unique().tolist()
     
     df_new = pd.DataFrame({'ASIN': all_asins})
     
@@ -103,13 +129,12 @@ def create_sales_report(day_max, day_min, PM, Inventory, max_days, min_days):
     df_pm_lookup_mgr = df_pm_lookup_mgr.drop_duplicates(subset='ASIN', keep='first')
     df_new['Manager'] = df_new['ASIN'].map(df_pm_lookup_mgr.set_index('ASIN')['Manager'])
     
+    # Results are now aligned with day.ipynb (filtering junk ASINs at source)
     return df_new
 
 def create_inventory_report(Inventory, PM, df_new, max_days, min_days):
     """Create inventory report dataframe"""
-    # Normalize ASINs
-    Inventory = normalize_asins(Inventory)
-    PM = normalize_asins(PM)
+    # Dataframes are already normalized by caller or within load_and_clean_sales_data
     
     # Create pivot table
     Inventory_pivot = Inventory.pivot_table(
