@@ -8,15 +8,51 @@ st.title("📊 Amazon OOS Daywise Analysis Dashboard")
 
 # File upload section
 st.sidebar.header("Upload Files")
-max_days_file = st.sidebar.file_uploader("Upload 90 Days Sales File", type=['xlsx'])
-min_days_file = st.sidebar.file_uploader("Upload 15 Days Sales File", type=['xlsx'])
-inventory_file = st.sidebar.file_uploader("Upload Inventory File", type=['xlsx'])
-pm_file = st.sidebar.file_uploader("Upload PM File", type=['xlsx'])
+# max_days_file = st.sidebar.file_uploader("Upload 90 Days Sales File", type=['xlsx'])
+# min_days_file = st.sidebar.file_uploader("Upload 15 Days Sales File", type=['xlsx'])
+# inventory_file = st.sidebar.file_uploader("Upload Inventory File", type=['xlsx'])
+# pm_file = st.sidebar.file_uploader("Upload PM File", type=['xlsx'])
+max_days_file = st.sidebar.file_uploader(
+    "Upload 90 Days Sales File (.xlsx / .txt)",
+    type=['xlsx', 'txt']
+)
+
+min_days_file = st.sidebar.file_uploader(
+    "Upload 15 Days Sales File (.xlsx / .txt)",
+    type=['xlsx', 'txt']
+)
+
+inventory_file = st.sidebar.file_uploader(
+    "Upload Inventory File (.xlsx / .txt)",
+    type=['xlsx', 'txt']
+)
+
+pm_file = st.sidebar.file_uploader(
+    "Upload PM File (.xlsx)",
+    type=['xlsx']
+)
+
 
 # Input parameters
 st.sidebar.header("Parameters")
 max_days = st.sidebar.number_input("Maximum Number of Days", min_value=1, value=90)
 min_days = st.sidebar.number_input("Minimum Number of Days", min_value=1, value=15)
+
+def load_file(file):
+    """Load Excel or TXT (tab-separated) file"""
+    if file.name.endswith(".xlsx"):
+        return pd.read_excel(file)
+
+    elif file.name.endswith(".txt"):
+        return pd.read_csv(
+            file,
+            sep="\t",          # TAB separated
+            encoding="utf-8",  # change to 'latin1' if needed
+            dtype=str          # safer for Amazon reports
+        )
+
+    else:
+        raise ValueError("Unsupported file format")
 
 # Process button
 process_data = st.sidebar.button("Process Data", type="primary")
@@ -52,7 +88,8 @@ def normalize_dataframe(df):
 
 def load_and_clean_sales_data(file, price_col='item-price'):
     """Load and clean sales data - Aligned with day.ipynb"""
-    df = pd.read_excel(file)
+    # df = pd.read_excel(file)
+    df = load_file(file)
     df = normalize_dataframe(df)
     
     # Notebook logic: Filter by non-zero price
@@ -198,11 +235,22 @@ if process_data and all([max_days_file, min_days_file, inventory_file, pm_file])
     with st.spinner('Processing data...'):
         try:
             # Load data
+            # day_max = load_and_clean_sales_data(max_days_file)
+            # day_min = load_and_clean_sales_data(min_days_file)
+            # Inventory = pd.read_excel(inventory_file)
+            # PM = pd.read_excel(pm_file)
+            day_max_raw = load_file(max_days_file)
+            day_min_raw = load_file(min_days_file)
+            inventory_raw = load_file(inventory_file)
+            PM = pd.read_excel(pm_file)  # PM stays Excel
+            
+            day_max = normalize_dataframe(day_max_raw)
+            day_min = normalize_dataframe(day_min_raw)
+            Inventory = normalize_dataframe(inventory_raw)
+            
             day_max = load_and_clean_sales_data(max_days_file)
             day_min = load_and_clean_sales_data(min_days_file)
-            Inventory = pd.read_excel(inventory_file)
-            PM = pd.read_excel(pm_file)
-            
+
             # Create reports
             sales_report = create_sales_report(day_max, day_min, PM, Inventory, max_days, min_days)
             inventory_report = create_inventory_report(Inventory, PM, sales_report, max_days, min_days)
@@ -305,3 +353,4 @@ else:
         
         5. **Download Reports** using the download buttons in each tab
         """)
+
