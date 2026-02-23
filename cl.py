@@ -13,18 +13,21 @@ st.sidebar.header("Upload Files")
 # inventory_file = st.sidebar.file_uploader("Upload Inventory File", type=['xlsx'])
 # pm_file = st.sidebar.file_uploader("Upload PM File", type=['xlsx'])
 max_days_file = st.sidebar.file_uploader(
-    "Upload 90 Days Sales File (.xlsx / .txt)",
-    type=['xlsx', 'txt']
+    "Upload 90 Days Sales File(s) (.xlsx / .txt)",
+    type=['xlsx', 'txt'],
+    accept_multiple_files=True
 )
 
 min_days_file = st.sidebar.file_uploader(
-    "Upload 15 Days Sales File (.xlsx / .txt)",
-    type=['xlsx', 'txt']
+    "Upload 15 Days Sales File(s) (.xlsx / .txt)",
+    type=['xlsx', 'txt'],
+    accept_multiple_files=True
 )
 
 inventory_file = st.sidebar.file_uploader(
-    "Upload Inventory File (.xlsx / .txt)",
-    type=['xlsx', 'txt']
+    "Upload Inventory File(s) (.xlsx / .txt)",
+    type=['xlsx', 'txt'],
+    accept_multiple_files=True
 )
 
 pm_file = st.sidebar.file_uploader(
@@ -32,11 +35,26 @@ pm_file = st.sidebar.file_uploader(
     type=['xlsx']
 )
 
-
 # Input parameters
 st.sidebar.header("Parameters")
 max_days = st.sidebar.number_input("Maximum Number of Days", min_value=1, value=90)
 min_days = st.sidebar.number_input("Minimum Number of Days", min_value=1, value=15)
+
+def load_multiple_files(files):
+    """Load and concatenate multiple Excel/TXT files based on header names"""
+    all_dfs = []
+    
+    for file in files:
+        df = load_file(file)
+        df.columns = df.columns.str.strip().str.lower()
+        all_dfs.append(df)
+    
+    if not all_dfs:
+        return pd.DataFrame()
+    
+    # Concatenate aligned by column names
+    combined = pd.concat(all_dfs, ignore_index=True, sort=False)
+    return combined
 
 def load_file(file):
     """Load Excel or TXT (tab-separated) file"""
@@ -107,6 +125,23 @@ def load_and_clean_sales_data(file, price_col='item-price'):
     if 'quantity' in df.columns:
         df['quantity'] = pd.to_numeric(df['quantity'], errors='coerce').fillna(0)
         
+    df.reset_index(drop=True, inplace=True)
+    return df
+
+def load_and_clean_sales_data_from_df(df):
+    df = normalize_dataframe(df)
+    
+    if 'item-price' in df.columns:
+        df['item-price'] = pd.to_numeric(df['item-price'], errors='coerce')
+        df = df[(df['item-price'].notna()) & (df['item-price'] != 0)]
+    
+    junk_asins = {'UNKNOW', 'UNKNOWN', 'NAN', 'N/A', '', 'NONE', '0', 'NULL'}
+    if 'asin' in df.columns:
+        df = df[~df['asin'].astype(str).str.upper().isin(junk_asins)]
+    
+    if 'quantity' in df.columns:
+        df['quantity'] = pd.to_numeric(df['quantity'], errors='coerce').fillna(0)
+    
     df.reset_index(drop=True, inplace=True)
     return df
 
@@ -239,17 +274,21 @@ if process_data and all([max_days_file, min_days_file, inventory_file, pm_file])
             # day_min = load_and_clean_sales_data(min_days_file)
             # Inventory = pd.read_excel(inventory_file)
             # PM = pd.read_excel(pm_file)
-            day_max_raw = load_file(max_days_file)
-            day_min_raw = load_file(min_days_file)
-            inventory_raw = load_file(inventory_file)
-            PM = pd.read_excel(pm_file)  # PM stays Excel
+            day_max_raw = load_multiple_files(max_days_file)
+            day_min_raw = load_multiple_files(min_days_file)
+            inventory_raw = load_multiple_files(inventory_file)
+            PM = pd.read_excel(pm_file)
+            PM.columns = PM.columns.str.strip().str.lower()  # PM stays Excel
+                        
+            # day_max = normalize_dataframe(day_max_raw)
+            # day_min = normalize_dataframe(day_min_raw)
+            # Inventory = normalize_dataframe(inventory_raw)
             
-            day_max = normalize_dataframe(day_max_raw)
-            day_min = normalize_dataframe(day_min_raw)
+            # day_max = load_and_clean_sales_data(max_days_file)
+            # day_min = load_and_clean_sales_data(min_days_file)
+            day_max = load_and_clean_sales_data_from_df(day_max_raw)
+            day_min = load_and_clean_sales_data_from_df(day_min_raw)
             Inventory = normalize_dataframe(inventory_raw)
-            
-            day_max = load_and_clean_sales_data(max_days_file)
-            day_min = load_and_clean_sales_data(min_days_file)
 
             # Create reports
             sales_report = create_sales_report(day_max, day_min, PM, Inventory, max_days, min_days)
@@ -353,4 +392,5 @@ else:
         
         5. **Download Reports** using the download buttons in each tab
         """)
+
 
