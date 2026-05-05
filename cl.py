@@ -201,7 +201,25 @@ def create_sales_report(day_max, day_min, PM, Inventory, max_days, min_days):
     df_pm_lookup_mgr = df_pm_lookup_mgr.drop_duplicates(subset='ASIN', keep='first')
     df_new['Manager'] = df_new['ASIN'].map(df_pm_lookup_mgr.set_index('ASIN')['Manager'])
     
-    # Results are now aligned with day.ipynb (filtering junk ASINs at source)
+    # Calculate DOC (Days Of Cover)
+    df_new['DOC Max Days'] = (df_new['Total Stock'] / df_new['DRR Max days']).round(2)
+    df_new['DOC Min Days'] = (df_new['Total Stock'] / df_new['DRR Min days']).round(2)
+    
+    # Replace inf with 0 or a sensible default if DRR is 0
+    df_new['DOC Max Days'] = df_new['DOC Max Days'].replace([float('inf'), -float('inf')], 0)
+    df_new['DOC Min Days'] = df_new['DOC Min Days'].replace([float('inf'), -float('inf')], 0)
+
+    # Reorder columns as requested
+    final_order = [
+        'ASIN', 'Brand', 'Manager', 'Product', 
+        'Sale last Max days', 'DRR Max days', 'DOC Max Days', 
+        'Sale last Min days', 'DRR Min days', 'DOC Min Days', 
+        'SIH', 'Reserved Stock', 'Total Stock', 'CP', 'Total Value'
+    ]
+    
+    # Ensure all columns exist before reordering
+    df_new = df_new[[c for c in final_order if c in df_new.columns]]
+    
     return df_new
 
 def create_inventory_report(Inventory, PM, df_new, max_days, min_days):
@@ -210,20 +228,21 @@ def create_inventory_report(Inventory, PM, df_new, max_days, min_days):
     
     # Create pivot table
     Inventory_pivot = Inventory.pivot_table(
-        index=["asin", "sku"],
+        index=["asin"],
         values=["afn-fulfillable-quantity", "afn-reserved-quantity"],
         aggfunc="sum"
     )
     Inventory_pivot.reset_index(inplace=True)
     Inventory_pivot["Total Stock"] = Inventory_pivot["afn-fulfillable-quantity"] + Inventory_pivot["afn-reserved-quantity"]
     
-    # Merge with PM data
-    Inventory_pivot = Inventory_pivot.merge(PM, left_on="asin", right_on=PM.columns[0], how="left")
+    # Merge with PM data (deduplicate PM first to avoid duplicate ASINs)
+    pm_dedup = PM.drop_duplicates(subset=PM.columns[0], keep='first')
+    Inventory_pivot = Inventory_pivot.merge(pm_dedup, left_on="asin", right_on=pm_dedup.columns[0], how="left")
     
     # Map Vendor SKU Codes, Brand Manager, Brand, Product Name, CP
     # (Assuming PM columns: 0:ASIN, 1:Vendor SKU, 4:Manager, 6:Brand, 7:Product, 9:CP)
     # Using names if available, otherwise indices
-    cols_to_keep = ['asin', 'sku', 'afn-fulfillable-quantity', 'afn-reserved-quantity', 'Total Stock']
+    cols_to_keep = ['asin', 'afn-fulfillable-quantity', 'afn-reserved-quantity', 'Total Stock']
     
     # Add calculated fields from PM
     Inventory_pivot["Vendor SKU Codes"] = Inventory_pivot.iloc[:, 1 + 5] # Placeholder based on user's code
@@ -243,7 +262,7 @@ def create_inventory_report(Inventory, PM, df_new, max_days, min_days):
             Inventory_pivot[label] = Inventory_pivot[col_name]
     
     # Select relevant columns
-    final_cols = ['asin', 'sku', 'Vendor SKU Codes', 'Brand Manager', 'Brand',
+    final_cols = ['asin', 'Vendor SKU Codes', 'Brand Manager', 'Brand',
                   'Product Name', 'afn-fulfillable-quantity', 'afn-reserved-quantity',
                   'Total Stock', 'CP']
     Inventory_pivot = Inventory_pivot[[c for c in final_cols if c in Inventory_pivot.columns]]
@@ -251,10 +270,25 @@ def create_inventory_report(Inventory, PM, df_new, max_days, min_days):
     # Add sales data from df_new
     df_new_indexed = df_new.set_index("ASIN")
     Inventory_pivot["Sales last Max days"] = Inventory_pivot["asin"].map(df_new_indexed["Sale last Max days"]).fillna(0)
-    Inventory_pivot["DRR Max"] = (Inventory_pivot["Sales last Max days"] / max_days).round(2)
+    Inventory_pivot["DRR Max Days"] = (Inventory_pivot["Sales last Max days"] / max_days).round(2)
+    Inventory_pivot["DOC Max Days"] = (Inventory_pivot["Total Stock"] / Inventory_pivot["DRR Max Days"]).round(2).replace([float('inf'), -float('inf')], 0).fillna(0)
     
     Inventory_pivot["Sales last Min days"] = Inventory_pivot["asin"].map(df_new_indexed["Sale last Min days"]).fillna(0)
-    Inventory_pivot["DRR Min"] = (Inventory_pivot["Sales last Min days"] / min_days).round(2)
+    Inventory_pivot["DRR Min Days"] = (Inventory_pivot["Sales last Min days"] / min_days).round(2)
+    Inventory_pivot["DOC Min Days"] = (Inventory_pivot["Total Stock"] / Inventory_pivot["DRR Min Days"]).round(2).replace([float('inf'), -float('inf')], 0).fillna(0)
+    
+    # Calculate Total Value
+    Inventory_pivot["Total Value"] = Inventory_pivot["Total Stock"] * Inventory_pivot["CP"]
+    
+    # Reorder columns as requested
+    final_cols = [
+        'asin', 'Vendor SKU Codes', 'Brand', 'Brand Manager', 'Product Name',
+        'Sales last Max days', 'DRR Max Days', 'DOC Max Days', 
+        'Sales last Min days', 'DRR Min Days', 'DOC Min Days', 
+        'afn-fulfillable-quantity', 'afn-reserved-quantity', 'Total Stock', 'CP', 'Total Value'
+    ]
+    
+    Inventory_pivot = Inventory_pivot[[c for c in final_cols if c in Inventory_pivot.columns]]
     
     return Inventory_pivot
 
@@ -392,5 +426,3 @@ else:
         
         5. **Download Reports** using the download buttons in each tab
         """)
-
-
